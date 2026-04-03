@@ -16,9 +16,11 @@ import logging
 import math
 import re
 import os
+import argparse
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Sequence
 
+from matplotlib.pyplot import step
 import torch
 import transformers
 from torch.nn import functional as F
@@ -43,11 +45,18 @@ do_print = True
 probe_topk = 5
 probe_idx = None
 test_attention = False
+inject_position = 1  # change this manually before each run (0-5)
+
+# GPT-2 token IDs confirmed from tokenization
+TOKEN_ID_OPEN_BRACKET  = 16791  # <<
+TOKEN_ID_CLOSE_BRACKET = 4211   # >>
+TOKEN_ID_EQUALS        = 28     # =
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
 
+<<<<<<< Updated upstream
 def parse_correct_indices(filepath):
     """Parse a decoded_latent.txt style file and return set of correct question indices."""
     correct = set()
@@ -73,6 +82,85 @@ def parse_correct_indices(filepath):
 
 
 def evaluation(model_args, data_args, training_args):
+=======
+def get_closing_bracket_repr(hidden_states, input_ids, batch_idx):
+     """
+     Extract hidden state at the last >> token (ID 4211) for a given batch item.
+     Returns tensor [1, 1, hidden_dim] or None if >> not found.
+     """
+     ids = input_ids[batch_idx]
+     hs  = hidden_states[-1][batch_idx]  # [seq_len, hidden_dim]
+
+     positions = (ids == TOKEN_ID_CLOSE_BRACKET).nonzero(as_tuple=True)[0]
+     if len(positions) == 0:
+         return None
+     pos = positions[-1].item()
+     return hs[pos].unsqueeze(0).unsqueeze(0)  # [1, 1, hidden_dim]
+
+def get_rhs_value_repr(hidden_states, input_ids, batch_idx):
+    """
+    Extract hidden state representation of the value to the right of '='
+    and before '>>' in the final <<...>> step.
+
+    Returns tensor [1, 1, hidden_dim] or None if pattern not found.
+    Uses mean pooling over RHS tokens.
+    """
+    ids = input_ids[batch_idx]
+    hs  = hidden_states[-1][batch_idx]  # [seq_len, hidden_dim]
+
+    eq_positions = (ids == TOKEN_ID_EQUALS).nonzero(as_tuple=True)[0]
+    close_positions = (ids == TOKEN_ID_CLOSE_BRACKET).nonzero(as_tuple=True)[0]
+
+    if len(eq_positions) == 0 or len(close_positions) == 0:
+        return None
+
+    eq_pos = eq_positions[-1].item()
+    close_pos = close_positions[-1].item()
+
+    # RHS tokens are strictly between '=' and '>>'
+    if close_pos <= eq_pos + 1:
+        return None
+
+    rhs_hs = hs[eq_pos + 1 : close_pos]
+
+    if rhs_hs.size(0) == 0:
+        return None
+
+    return rhs_hs.mean(dim=0, keepdim=True).unsqueeze(0)  # [1,1,h]
+
+def get_n_minus_1_cot_step(raw_cot: str):
+    """
+    Returns the penultimate <<...>> step from the CoT.
+    If there are fewer than 2 bracketed steps, returns None.
+    """
+    cot_steps = re.findall(r'<<[^>]*>>', raw_cot)
+    if len(cot_steps) < 2:
+        return None
+    return cot_steps[-2]
+
+def get_first_cot_step(raw_cot: str):
+    """
+    Returns the first <<...>> step from the CoT.
+    If there are no bracketed steps, returns None.
+    """
+    cot_steps = re.findall(r'<<[^>]*>>', raw_cot)
+    if len(cot_steps) < 1:
+        return None
+    return cot_steps[0]
+
+def get_second_cot_step(raw_cot: str):
+    """
+    Returns the first <<...>> step from the CoT.
+    If there are no bracketed steps, returns None.
+    """
+    cot_steps = re.findall(r'<<[^>]*>>', raw_cot)
+    if len(cot_steps) < 2:
+        return None
+    return cot_steps[1]
+
+
+def evaluation(model_args, data_args, training_args, inject_position):
+>>>>>>> Stashed changes
     if model_args.lora_init:
         task_type = TaskType.CAUSAL_LM
         if any(name in model_args.model_name_or_path.lower() for name in ["llama", "mistral", "falcon", "qwen"]):
@@ -127,14 +215,15 @@ def evaluation(model_args, data_args, training_args):
     ######################
     logging.warning("Downloading Data")
     question_name = "question"
-    answer_name = "answer"
+    answer_name   = "answer"
     if "zen-E/GSM8k-Aug" in data_args.data_name:
-        dataset = load_dataset(data_args.data_name)
+        dataset  = load_dataset(data_args.data_name)
         test_set = dataset['test']
     else:
         raise NotImplementedError
 
     logging.warning("Formatting inputs...")
+<<<<<<< Updated upstream
     question = []
     answer = []
     procedures = []
@@ -198,21 +287,105 @@ def evaluation(model_args, data_args, training_args):
                 return_tensors="pt",
                 padding="longest",
             )
+=======
+    # question_explicit: question + penultimate CoT step (n-1 step) for repr extraction
+    # question_plain:    question only (for pure latent run with injection)
+    question_explicit = []
+    question_plain    = []
+    answer            = []
+    procedures        = []
+    original_indices  = []
+    selected_steps    = []
+
+    for idx, example in enumerate(test_set):
+        raw_q   = example[question_name].strip().replace('  ', ' ')
+        raw_cot = example["cot"]
+
+        #n_minus_1_step = get_n_minus_1_cot_step(raw_cot)
+
+        #if n_minus_1_step is not None:
+        #    q_explicit = f"{raw_q} {n_minus_1_step}"
+        #else:
+        #    q_explicit = raw_q
+
+        #question_explicit.append(q_explicit)
+        #question_plain.append(raw_q)
+        #answer.append(float(example[answer_name].replace(",", "")))
+        #procedures.append(raw_cot)
+        #original_indices.append(idx)
+        #selected_steps.append(n_minus_1_step)
+        first_step = get_first_cot_step(raw_cot)
+
+        if first_step is not None:
+            q_explicit = f"{raw_q} {first_step}"
+        else:
+            q_explicit = raw_q
+        
+        #second_step = get_second_cot_step(raw_cot)
+
+        #if second_step is not None:
+        #    q_explicit = f"{raw_q} {second_step}"
+        #else:
+        #    q_explicit = raw_q
+
+        question_explicit.append(q_explicit)
+        question_plain.append(raw_q)
+        answer.append(float(example[answer_name].replace(",", "")))
+        procedures.append(raw_cot)
+        original_indices.append(idx)
+        selected_steps.append(first_step)
+
+
+    # No filtering — run on full dataset
+    logging.warning(f"Total questions: {len(question_explicit)}")
+    logging.warning(f"inject_position={inject_position}")
+
+    eval_step = math.ceil(len(question_explicit) / data_args.batch_size)
+    logging.warning(f"eval batch size: {data_args.batch_size} | eval steps: {eval_step}")
+
+    # Build explicit batches (no BOT token — just for >> repr extraction)
+    explicit_data = []
+    for i in range(eval_step):
+        sl    = slice(i * data_args.batch_size, (i + 1) * data_args.batch_size if i < eval_step - 1 else None)
+        batch = tokenizer(question_explicit[sl], return_tensors="pt", padding="longest")
+        for k, v in batch.items():
+            if torch.is_tensor(v):
+                batch[k] = v.to(device)
+        explicit_data.append(batch)
+        
+
+    # Build plain batches (with BOT token — for pure latent run)
+    plain_data = []
+    for i in range(eval_step):
+        sl = slice(i * data_args.batch_size, (i + 1) * data_args.batch_size if i < eval_step - 1 else None)
+        batch = tokenizer(question_plain[sl], return_tensors="pt", padding="longest")
+>>>>>>> Stashed changes
 
         if training_args.remove_eos:
             bot_tensor = torch.tensor([model.bot_id], dtype=torch.long).expand(batch["input_ids"].size(0), 1)
         else:
             bot_tensor = torch.tensor([tokenizer.eos_token_id, model.bot_id], dtype=torch.long).expand(batch["input_ids"].size(0), 2)
+
         batch["input_ids"] = torch.cat((batch["input_ids"], bot_tensor), dim=1)
         batch["attention_mask"] = torch.cat((batch["attention_mask"], torch.ones_like(bot_tensor)), dim=1)
+<<<<<<< Updated upstream
         # Fix: store input_len AFTER moving to device
         input_len = len(batch["input_ids"][0])
         question_data.append(batch.to(device))
         question_data[-1]['input_len'] = input_len
+=======
+
+        for k, v in batch.items():
+            if torch.is_tensor(v):
+                batch[k] = v.to(device)
+
+        plain_data.append(batch)
+>>>>>>> Stashed changes
 
     model.eval()
     gen_kwargs = {
         "max_new_tokens": 256,
+<<<<<<< Updated upstream
         "temperature": 0.1,
         "top_k": 40,
         "top_p": 0.95,
@@ -229,9 +402,55 @@ def evaluation(model_args, data_args, training_args):
     for step, batch in enumerate(question_data):
         batch_size = batch["input_ids"].size(0)
         top5_values_list, top5_indices_list = [], []
+=======
+        "temperature":    0.1,
+        "top_k":          40,
+        "top_p":          0.95,
+        "do_sample":      True,
+    }
+
+    ans_pred_list = []
+    len_cot       = []
+    log_count     = 0
+    log           = []
+
+    for step in range(eval_step):
+        explicit_batch = explicit_data[step]
+        plain_batch    = plain_data[step]
+        batch_size     = plain_batch["input_ids"].size(0)
+
+>>>>>>> Stashed changes
         with torch.no_grad():
-            # encode the question
+
+            # ----------------------------------------------------------
+            # Pass 1: forward on explicit questions to extract RHS value repr
+            # ----------------------------------------------------------
+            explicit_outputs = model.codi(
+                input_ids=explicit_batch["input_ids"],
+                attention_mask=explicit_batch["attention_mask"],
+                output_hidden_states=True,
+                use_cache=False,
+            )
+
+            explicit_reprs = []
+            for b in range(batch_size):
+                repr_vec = get_rhs_value_repr(
+                    explicit_outputs.hidden_states,
+                    explicit_batch["input_ids"],
+                    b,
+                )
+                if repr_vec is not None and training_args.use_prj:
+                    repr_vec = model.prj(repr_vec)
+                explicit_reprs.append(repr_vec)
+
+            none_count = sum(1 for r in explicit_reprs if r is None)
+            print(f"Step {step}: {none_count}/{batch_size} explicit_reprs are None")
+
+            # ----------------------------------------------------------
+            # Pass 2: pure latent run on plain questions with injection
+            # ----------------------------------------------------------
             past_key_values = None
+<<<<<<< Updated upstream
             outputs = model.codi(input_ids=batch["input_ids"], use_cache=True, output_hidden_states=True,
                                  past_key_values=past_key_values, attention_mask=batch["attention_mask"])
             past_key_values = outputs.past_key_values
@@ -242,12 +461,27 @@ def evaluation(model_args, data_args, training_args):
             top5_values_list.append(top5_values)
             top5_indices_list.append(top5_indices)
 
+=======
+            outputs = model.codi(
+                input_ids=plain_batch["input_ids"],
+                use_cache=True,
+                output_hidden_states=True,
+                past_key_values=past_key_values,
+                attention_mask=plain_batch["attention_mask"],
+            )
+            past_key_values = outputs.past_key_values
+            latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
+
+>>>>>>> Stashed changes
             if training_args.use_prj:
                 latent_embd = model.prj(latent_embd)
 
-            # Iterate the latent thoughts
             inf_latent_iterations = training_args.inf_latent_iterations
+            print("inf_latent_iterations =", inf_latent_iterations)
+            print("inject_position =", inject_position)
+
             for i in range(inf_latent_iterations):
+<<<<<<< Updated upstream
                 outputs = model.codi(inputs_embeds=latent_embd, use_cache=True, output_hidden_states=True,
                                      past_key_values=past_key_values)
                 past_key_values = outputs.past_key_values
@@ -256,12 +490,35 @@ def evaluation(model_args, data_args, training_args):
                 top5_values, top5_indices = torch.topk(probs, k=probe_topk, dim=2)
                 top5_values_list.append(top5_values)
                 top5_indices_list.append(top5_indices)
+=======
+                if i == inject_position:
+                    for b in range(batch_size):
+                        if explicit_reprs[b] is not None:
+                            before = latent_embd[b].clone()
+                            latent_embd[b] = explicit_reprs[b].to(
+                                device=latent_embd.device,
+                                dtype=latent_embd.dtype
+                            ).squeeze(0)
+                            delta = (latent_embd[b] - before).norm().item()
+                            if b == 0:
+                                print(f"Injected at latent step {i}, delta norm = {delta:.6f}")
+
+                outputs = model.codi(
+                    inputs_embeds=latent_embd,
+                    use_cache=True,
+                    output_hidden_states=True,
+                    past_key_values=past_key_values
+                )
+                past_key_values = outputs.past_key_values
+                latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
+>>>>>>> Stashed changes
 
                 if training_args.use_prj:
                     latent_embd = model.prj(latent_embd)
 
             if training_args.remove_eos:
                 eot_emb = model.get_embd(model.codi, model.model_name)(
+<<<<<<< Updated upstream
                     torch.tensor([model.eot_id], dtype=torch.long, device='cuda')).unsqueeze(0).to(device)
             else:
                 eot_emb = model.get_embd(model.codi, model.model_name)(
@@ -275,13 +532,32 @@ def evaluation(model_args, data_args, training_args):
             pred_tokens = [[] for _ in range(batch_size)]
             for i in range(gen_kwargs["max_new_tokens"]):
                 seq_len += 1
+=======
+                    torch.tensor([model.eot_id], dtype=torch.long, device='cuda')
+                ).unsqueeze(0).to(device)
+            else:
+                eot_emb = model.get_embd(model.codi, model.model_name)(
+                    torch.tensor([model.eot_id, tokenizer.eos_token_id], dtype=torch.long, device='cuda')
+                ).unsqueeze(0).to(device)
+
+            eot_emb = eot_emb.expand(batch_size, -1, -1)
+            output = eot_emb
+            finished = torch.zeros(batch_size, dtype=torch.bool, device="cuda")
+            pred_tokens = [[] for _ in range(batch_size)]
+
+            for i in range(gen_kwargs["max_new_tokens"]):
+>>>>>>> Stashed changes
                 out = model.codi(
                     inputs_embeds=output,
                     output_hidden_states=False,
                     attention_mask=None,
                     use_cache=True,
                     output_attentions=False,
+<<<<<<< Updated upstream
                     past_key_values=past_key_values
+=======
+                    past_key_values=past_key_values,
+>>>>>>> Stashed changes
                 )
                 past_key_values = out.past_key_values
                 logits = out.logits[:, -1, :model.codi.config.vocab_size - 1]
@@ -294,7 +570,6 @@ def evaluation(model_args, data_args, training_args):
                         top_k_values, _ = torch.topk(logits, gen_kwargs["top_k"], dim=-1)
                         min_top_k_value = top_k_values[:, -1].unsqueeze(-1)
                         logits[logits < min_top_k_value] = -float("inf")
-
                     if gen_kwargs["top_p"] < 1.0:
                         sorted_logit, sorted_indices = torch.sort(logits, descending=True, dim=-1)
                         cumulative_probs = torch.cumsum(F.softmax(sorted_logit, dim=-1), dim=-1)
@@ -304,7 +579,10 @@ def evaluation(model_args, data_args, training_args):
                             sorted_indices_to_remove[:, 0] = False
                         for b in range(logits.size(0)):
                             logits[b, sorted_indices[b, sorted_indices_to_remove[b]]] = -float("inf")
+<<<<<<< Updated upstream
 
+=======
+>>>>>>> Stashed changes
                     probs = F.softmax(logits, dim=-1)
                     next_token_ids = torch.multinomial(probs, num_samples=1).squeeze(-1)
 
@@ -322,16 +600,26 @@ def evaluation(model_args, data_args, training_args):
             for mini_step, pred_token in enumerate(pred_tokens):
                 len_cot.append(len(pred_token))
                 decoded_pred = tokenizer.decode(pred_token, skip_special_tokens=True)
+<<<<<<< Updated upstream
                 global_idx = step * data_args.batch_size + mini_step
                 if do_print:
                     print(f"Question {global_idx} Starts...")
                     print(f"Q: {question[global_idx]}")
+=======
+                global_idx   = step * data_args.batch_size + mini_step
+                if do_print:
+                    print(f"Question {global_idx} Starts...")
+                    print(f"Q (explicit): {question_explicit[global_idx]}")
+                    print(f"Injected step: {selected_steps[global_idx]}")
+                    print(f"Full CoT: {procedures[global_idx]}")
+>>>>>>> Stashed changes
                     print(decoded_pred)
                     print(f"Question {global_idx} Ends")
                     print(f"Prediction={extract_answer_number(decoded_pred)}; Groundtruth={answer[global_idx]}")
                     print("")
                 ans_pred_list.append(extract_answer_number(decoded_pred))
 
+<<<<<<< Updated upstream
             top5_values_list = torch.cat(top5_values_list, dim=1)
             top5_indices_list = torch.cat(top5_indices_list, dim=1)
 
@@ -363,6 +651,27 @@ def evaluation(model_args, data_args, training_args):
         f.write("\n".join(log))
 
     print(f"adapter: {model_args.adapter_name_or_path} | GSM8K test accuracy: {100 * accuracy:.2f}% | ")
+=======
+            for ii in range(batch_size):
+                pred    = extract_answer_number(tokenizer.decode(pred_tokens[ii]))
+                correct = int(answer[log_count]) == int(pred)
+
+                log.append(f"Question{original_indices[log_count]}...")
+                log.append(f"Correct={correct}")
+                log.append(f"{question_explicit[log_count]}...")
+                log.append(f"CoT={procedures[log_count]}, Answer={answer[log_count]}")
+                log.append(f"Model Prediction: {tokenizer.decode(pred_tokens[ii])}")
+                log.append("\n\n")
+
+                log_count += 1
+
+    accuracy  = compute_accuracy(answer, ans_pred_list)
+    out_fname = f"outputs/injection_closing_bracket_pos{inject_position}.txt"
+    with open(out_fname, "w") as f:
+        f.write("\n".join(log))
+
+    print(f"inject_position={inject_position} | GSM8K test accuracy: {100 * accuracy:.2f}%")
+>>>>>>> Stashed changes
     print(f"average length of COT: {sum(len_cot) / len(len_cot)}")
 
     return 100 * accuracy
@@ -394,6 +703,10 @@ if __name__ == "__main__":
 
     accu_list = []
     for i in range(training_args.inf_num_iterations):
-        accu = evaluation(model_args, data_args, training_args)
+        accu = evaluation(model_args, data_args, training_args, inject_position)
         accu_list.append(accu)
+<<<<<<< Updated upstream
     print(f"Average accuracy over {training_args.inf_num_iterations} sampling: {sum(accu_list) / len(accu_list)}")
+=======
+    print(f"Average accuracy over {training_args.inf_num_iterations} sampling: {sum(accu_list) / len(accu_list)}")
+>>>>>>> Stashed changes
